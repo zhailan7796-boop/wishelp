@@ -86,27 +86,46 @@ class FollowStatusWindow {
         this.SetText("ToggleButton",app.Enabled ? "暂停跟随" : "启用跟随")
         elapsed := Max(0, Floor((Desktop.Tick() - app.StartTick) / 1000))
         runtime := Format("{:02}:{:02}:{:02}", elapsed // 3600, Mod(elapsed // 60, 60), Mod(elapsed, 60))
-        this.SetText("Footer","已运行 " . runtime . "    ·    v0.3.1    ·    Ctrl+Alt+F12 暂停/启用")
+        this.SetText("Footer","已运行 " . runtime . "    ·    v0.3.2    ·    Ctrl+Alt+F12 暂停/启用")
         return true
     }
+    static AppDirectory {
+        get {
+            SplitPath(A_LineFile, , &library)
+            SplitPath(library, , &root)
+            return root
+        }
+    }
+    static IconPath => this.AppDirectory . "\launcher\TaskbarFollow.ico"
+
     static SetAppId(hwnd) {
         iid := Desktop.Guid("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}")
         storePtr := 0
         if DllCall("shell32\SHGetPropertyStoreForWindow","ptr",hwnd,"ptr",iid,"ptr*",&storePtr,"int") < 0 || !storePtr
             throw Error("Cannot obtain the status window property store")
-        store := ComValue(13,storePtr,1), key := Buffer(20,0), value := Buffer(24,0)
+        store := ComValue(13,storePtr,1), key := Buffer(20,0)
         guid := Desktop.Guid("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}")
         DllCall("ntdll\RtlMoveMemory","ptr",key,"ptr",guid,"uptr",16)
-        NumPut("uint",5,key,16)
-        appId := "TaskbarFollow.Status"
-        text := DllCall("ole32\CoTaskMemAlloc","uptr",(StrLen(appId)+1)*2,"ptr")
+        launcher := this.AppDirectory . "\Start.exe"
+        ; A source checkout can also be started via Start.cmd before compiling Start.exe.
+        command := FileExist(launcher) ? '"' . launcher . '"' : '"' . A_AhkPath . '" "' . this.AppDirectory . '\TaskbarFollow.ahk"'
+        ; Explorer reads the relaunch metadata when it is notified of the AppID.
+        this.SetAppString(store,key,2,command)                 ; RelaunchCommand
+        this.SetAppString(store,key,3,this.IconPath . ",0")   ; RelaunchIconResource
+        this.SetAppString(store,key,4,"随屏")                  ; RelaunchDisplayNameResource
+        this.SetAppString(store,key,5,"TaskbarFollow.Status") ; AppUserModelID
+        ComCall(7,store)
+    }
+    static SetAppString(store,key,propertyId,string) {
+        NumPut("uint",propertyId,key,16)
+        value := Buffer(24,0)
+        text := DllCall("ole32\CoTaskMemAlloc","uptr",(StrLen(string)+1)*2,"ptr")
         if !text
-            throw Error("Cannot allocate the status window identity")
+            throw Error("Cannot allocate the taskbar property")
         NumPut("ushort",31,value,0), NumPut("ptr",text,value,8) ; VT_LPWSTR
         try {
-            StrPut(appId,text,StrLen(appId)+1)
+            StrPut(string,text,StrLen(string)+1)
             ComCall(6,store,"ptr",key,"ptr",value)
-            ComCall(7,store)
         } finally DllCall("ole32\PropVariantClear","ptr",value)
     }
     PrepareMonitor(monitor,center := false) {

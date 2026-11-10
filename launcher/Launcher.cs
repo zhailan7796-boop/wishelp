@@ -4,9 +4,9 @@ using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("TaskbarFollow Launcher")]
+[assembly: AssemblyTitle("随屏")]
 [assembly: AssemblyDescription("Starts the local, portable AutoHotkey v2 taskbar follower")]
-[assembly: AssemblyVersion("0.3.1.0")]
+[assembly: AssemblyVersion("0.3.2.0")]
 
 internal static class Launcher
 {

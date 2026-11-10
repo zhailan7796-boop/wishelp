@@ -30,7 +30,8 @@ class UiaCacheChecks {
         deadline := Desktop.Tick()+3000
         while Desktop.Tick() < deadline {
             hwnd := DllCall("user32\FindWindowW","ptr",0,"wstr",title,"ptr")
-            if hwnd && Desktop.Pid(hwnd) = pid
+            ; The fixture creates its controls before showing the window.
+            if hwnd && Desktop.Pid(hwnd) = pid && DllCall("user32\IsWindowVisible","ptr",hwnd)
                 return hwnd
             Sleep(20)
         }

@@ -355,7 +355,8 @@ class WindowIdentity {
         }
         return false
     }
-    static WindowAppId(hwnd) {
+    static WindowAppId(hwnd) => this.WindowAppProperty(hwnd, 5)
+    static WindowAppProperty(hwnd, propertyId) {
         store := 0
         iid := Desktop.Guid("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}")
         hr := DllCall("shell32\SHGetPropertyStoreForWindow", "ptr", hwnd, "ptr", iid, "ptr*", &store, "int")
@@ -365,7 +366,7 @@ class WindowIdentity {
         key := Buffer(20, 0)
         guid := Desktop.Guid("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}")
         DllCall("ntdll\RtlMoveMemory", "ptr", key, "ptr", guid, "uptr", 16)
-        NumPut("uint", 5, key, 16)
+        NumPut("uint", propertyId, key, 16)
         pv := Buffer(24, 0)
         try {
             ComCall(5, obj, "ptr", key, "ptr", pv)

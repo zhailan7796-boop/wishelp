@@ -5,7 +5,8 @@ $root = $PSScriptRoot
 if ($LASTEXITCODE -ne 0) { throw 'Native component build failed.' }
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $launcher = Join-Path $root 'Start.exe'
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll ('/out:' + $launcher) (Join-Path $root 'launcher\Launcher.cs')
+$icon = Join-Path $root 'launcher\TaskbarFollow.ico'
+& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll ('/win32icon:' + $icon) ('/out:' + $launcher) (Join-Path $root 'launcher\Launcher.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Launcher compilation failed' }
 if (-not $SkipTests) {
     $localSettings = Join-Path $root 'settings.ini'

@@ -66,6 +66,13 @@ try {
     SelfChecks.Hwnd := panel.Window.Hwnd
     SelfChecks.Assert(!panel.Visible,"Status GUI starts hidden before its first show")
     SelfChecks.Equal(WindowIdentity.WindowAppId(panel.Window.Hwnd),"TaskbarFollow.Status","Owned status GUI has a stable explicit AppID before its first show")
+    SplitPath(A_ScriptDir, , &appRoot)
+    launcher := appRoot . "\Start.exe"
+    command := FileExist(launcher) ? '"' . launcher . '"' : '"' . A_AhkPath . '" "' . appRoot . '\TaskbarFollow.ahk"'
+    SelfChecks.Equal(WindowIdentity.WindowAppProperty(panel.Window.Hwnd,2),command,"Taskbar relaunch uses the application entry point and quoted paths")
+    SelfChecks.Equal(WindowIdentity.WindowAppProperty(panel.Window.Hwnd,3),appRoot . "\launcher\TaskbarFollow.ico,0","Taskbar pin uses the application icon")
+    SelfChecks.Assert(FileExist(appRoot . "\launcher\TaskbarFollow.ico"),"Pinned icon exists")
+    SelfChecks.Equal(WindowIdentity.WindowAppProperty(panel.Window.Hwnd,4),"随屏","Taskbar pin uses the application name")
     SelfChecks.App := app
     clickHandler := ObjBindMethod(SelfChecks,"RouteClick")
     visibleHandler := ObjBindMethod(SelfChecks,"ObserveVisible")

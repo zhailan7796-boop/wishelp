@@ -149,7 +149,7 @@ class TaskbarFollow {
         A_TrayMenu.Add("退出", (*) => ExitApp())
         A_TrayMenu.Default := "显示运行状态"
         this.TrayBuilt := true
-        try TraySetIcon("shell32.dll", 16)
+        try TraySetIcon(FollowStatusWindow.IconPath)
         this.UpdateTray()
     }
     UpdateTray() {
