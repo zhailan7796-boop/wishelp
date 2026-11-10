@@ -5,7 +5,7 @@
   ·
   <a href="https://github.com/zhailan7796-boop/wishelp/releases">查看版本</a>
 </p>
-<p align="center">Windows 11 x64 · v0.3.2 试用版 · 解压即用</p>
+<p align="center">Windows 11 x64 · v0.3.2 · 解压即用</p>
 
 ## 少一次把窗口拖回来的动作
 
@@ -21,9 +21,7 @@
 2. 双击 `Start.exe`，等状态显示「运行中」。运行时随包附带。
 3. 把一个应用最小化，再从另一块屏幕的任务栏点它，看看窗口出现在哪块屏幕。
 
-如果旧版曾固定成绿色的 AutoHotkey 图标，先取消旧固定并退出旧版。打开 v0.3.2 后，右键任务栏上运行中的随屏图标，选择「固定到任务栏」。
-
-这是 Windows 11 x64 试用版。应用和任务栏布局会影响跟随效果。遇到问题可以从状态窗口打开「兼容性诊断」，再到 [Issues](https://github.com/zhailan7796-boop/wishelp/issues) 反馈系统版本、应用名称和复现步骤。
+遇到问题可以从状态窗口打开「兼容性诊断」，再到 [Issues](https://github.com/zhailan7796-boop/wishelp/issues) 反馈系统版本、应用名称和复现步骤。
 
 ## 源码与构建
 
