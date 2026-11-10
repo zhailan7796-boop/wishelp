@@ -1,0 +1,14 @@
+logs/
+diagnostics.txt
+/settings.ini
+/Start.exe
+/native/bin/
+/native/obj/
+/tools/*
+!/tools/Invoke-InputDesktop.ps1
+!/tools/Configure-DisplayStartup.ahk
+dist/
+tests/results/
+tests/logs/
+tests/*-output.txt
+tests/*-errors.txt
