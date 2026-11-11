@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="桌面图标开关" Manufacturer="Desktop Icon Toggle" Language="2052" Codepage="936"
+           Version="$(var.ProductVersion)" Scope="perUser" InstallerVersion="500"
+           UpgradeCode="{948562A3-F95C-4EE3-9EE7-D48EA0E9F2C7}">
+    <SummaryInformation Codepage="936" Description="桌面图标开关 Windows 安装包" />
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="电脑上已安装更新版本的桌面图标开关。" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="DefaultUIFont" Value="BodyFont" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Desktop Icon Toggle">
+          <Component Id="App" Guid="{AFBF6BE8-A782-4F38-A56A-3289675D0397}">
+            <File Id="AppExe" Name="DesktopIconToggle.exe" Source="$(var.AppExePath)" />
+            <RegistryValue Root="HKCU" Key="Software\Desktop Icon Toggle" Name="InstallPath"
+                           Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="桌面图标开关">
+        <Component Id="StartMenuEntries" Guid="{D6742D44-2DCD-43BE-A3A1-0AF14C5FDD89}">
+          <Shortcut Id="ToggleShortcut" Name="桌面图标开关" Target="[#AppExe]" WorkingDirectory="INSTALLFOLDER"
+                    Description="隐藏桌面图标，再打开一次即可恢复。" />
+          <Shortcut Id="RestoreShortcut" Name="恢复桌面图标" Target="[#AppExe]" Arguments="--show"
+                    WorkingDirectory="INSTALLFOLDER" Description="直接显示桌面图标。" />
+          <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Desktop Icon Toggle" Name="StartMenuEntries"
+                         Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="DesktopIconToggle" Title="桌面图标开关" Level="1">
+      <ComponentRef Id="App" />
+      <ComponentRef Id="StartMenuEntries" />
+    </Feature>
+
+    <UI>
+      <TextStyle Id="BodyFont" FaceName="Microsoft YaHei UI" Size="10" />
+      <TextStyle Id="TitleFont" FaceName="Microsoft YaHei UI" Size="15" Bold="yes" />
+      <Dialog Id="Welcome" Width="320" Height="147" Title="[ProductName] 安装程序">
+        <Control Id="Heading" Type="Text" X="20" Y="20" Width="280" Height="25"
+                 Text="{\TitleFont}安装桌面图标开关" />
+        <Control Id="Body" Type="Text" X="20" Y="53" Width="280" Height="42"
+                 Text="安装到当前 Windows 账户。完成后，从开始菜单打开「桌面图标开关」。" />
+        <Control Id="Install" Type="PushButton" X="151" Y="111" Width="68" Height="21" Text="安装" Default="yes">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="230" Y="111" Width="68" Height="21" Text="取消" Cancel="yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+      </Dialog>
+      <Dialog Id="Finished" Width="320" Height="147" Title="[ProductName] 安装程序">
+        <Control Id="Heading" Type="Text" X="20" Y="20" Width="280" Height="25" Text="{\TitleFont}安装完成" />
+        <Control Id="Body" Type="Text" X="20" Y="53" Width="280" Height="46"
+                 Text="按 Win 键，搜索「桌面图标开关」即可切换。需要直接显示时，搜索「恢复桌面图标」。" />
+        <Control Id="Close" Type="PushButton" X="230" Y="111" Width="68" Height="21" Text="完成" Default="yes" Cancel="yes">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="Welcome" Before="ExecuteAction" Condition="NOT Installed" />
+        <Show Dialog="Finished" OnExit="success" Condition="NOT Installed" />
+      </InstallUISequence>
+    </UI>
+  </Package>
+</Wix>

@@ -23,6 +23,10 @@
 
 遇到问题可以从状态窗口打开「兼容性诊断」，再到 [Issues](https://github.com/zhailan7796-boop/wishelp/issues) 反馈系统版本、应用名称和复现步骤。
 
+## 桌面图标开关
+
+共享屏幕前，点一下奶牛猫就能收起桌面图标。再点一次即可恢复。适用于 Windows 10 22H2 和 Windows 11。 [查看用法与下载](desktop-icon-toggle/README.md)
+
 ## 源码与构建
 
 程序入口为 [TaskbarFollow.ahk](TaskbarFollow.ahk)。[lib/](lib) 包含状态窗口和应用识别代码，[native/](native) 包含 Windows 窗口定位组件，[tests/](tests) 包含回归检查。
