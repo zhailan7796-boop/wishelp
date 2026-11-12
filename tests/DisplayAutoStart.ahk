@@ -127,6 +127,26 @@ try {
     DisplayStartChecks.Equal(watcher.Check(),"launched","A fresh reconnection may launch after a manual exit")
     DisplayStartChecks.Equal(watcher.TestLaunches,1,"A fresh reconnection invokes one launch")
 
+    watcher := DisplayWatcherFixture(), watcher.TestCount := 2, watcher.TestRunning := true
+    watcher.Check()
+    watcher.TestNow := 1500
+    watcher.Check()
+    watcher.TestRunning := false
+    watcher.Started := true
+    watcher.TestCount := 1
+    watcher.Changed(0,0,0x7E)
+    watcher.TestCount := 2, watcher.TestNow := 2000
+    watcher.Changed(0,0,0x7E)
+    SetTimer(watcher.EventCallback,0)
+    watcher.Started := false
+    DisplayStartChecks.Equal(watcher.Check(),"settling","A brief disconnect observed only by a display message rearms detection")
+    watcher.TestNow := 3499
+    watcher.Check()
+    DisplayStartChecks.Equal(watcher.TestLaunches,0,"A quick reconnect still waits for display stability")
+    watcher.TestNow := 3500
+    DisplayStartChecks.Equal(watcher.Check(),"launched","The stable reconnect starts the engine")
+    DisplayStartChecks.Equal(watcher.TestLaunches,1,"A quick reconnect starts exactly one instance")
+
     ; Failed launch is bounded to one attempt in a connection cycle. A later
     ; reconnection offers a retry without an uncontrolled background loop.
     watcher := DisplayWatcherFixture(), watcher.TestCount := 2, watcher.TestFailLaunch := true

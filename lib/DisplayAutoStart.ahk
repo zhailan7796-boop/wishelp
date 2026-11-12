@@ -3,11 +3,14 @@
 class DisplayStartPolicy {
     __New(stableMs := 1500) {
         this.StableMs := Max(0,stableMs)
+        this.Reset()
+    }
+    Reset() {
         this.Qualifying := false, this.Fired := false, this.Since := 0
     }
     Observe(count,now) {
         if count < 2 {
-            this.Qualifying := false, this.Fired := false, this.Since := 0
+            this.Reset()
             return false
         }
         if !this.Qualifying {
@@ -37,7 +40,7 @@ class DisplayWatcher {
         this.StartupPath := startupPath != "" ? startupPath : A_Startup . "\TaskbarFollow.lnk"
         this.Policy := DisplayStartPolicy()
         this.State := "waiting", this.LastReport := "", this.LastLaunchPid := 0
-        this.Started := false, this.Stopped := false, this.Busy := false
+        this.Started := false, this.Stopped := false, this.Busy := false, this.DisconnectSeen := false
         this.CheckCallback := ObjBindMethod(this,"Check")
         this.ChangeCallback := ObjBindMethod(this,"Changed")
         this.EventCallback := ObjBindMethod(this,"Check")
@@ -57,10 +60,17 @@ class DisplayWatcher {
         this.Check()
     }
     Changed(*) {
-        if this.Started && !this.Stopped
-            SetTimer(this.EventCallback,-200)
+        if !this.Started || this.Stopped
+            return
+        ; Remember a brief drop to one display even if the next notification
+        ; reschedules Check after Windows has already restored the second display.
+        try {
+            if this.Count() < 2
+                this.DisconnectSeen := true
+        }
+        SetTimer(this.EventCallback,-200)
     }
-    Count() => MonitorGetCount()
+    Count() => SysGet(80) ; SM_CMONITORS: displays participating in the desktop
     Now() => DllCall("kernel32\GetTickCount64","uint64")
     Installed() {
         if !FileExist(this.StartupPath)
@@ -116,6 +126,10 @@ class DisplayWatcher {
                 return "disabled"
             }
             count := this.Count(), now := this.Now()
+            if this.DisconnectSeen {
+                this.DisconnectSeen := false
+                this.Policy.Reset()
+            }
             fire := this.Policy.Observe(count,now)
             if count < 2
                 return this.Report("waiting",count)
