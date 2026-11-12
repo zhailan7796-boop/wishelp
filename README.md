@@ -1,11 +1,11 @@
 <h1 align="center">随屏</h1>
 <p align="center"><strong>副屏点开的应用，在副屏接着用。</strong></p>
 <p align="center">
-  <a href="https://github.com/zhailan7796-boop/wishelp/releases/download/v0.3.2/TaskbarFollow-0.3.2-portable.zip"><strong>下载 Windows 便携版 ↓</strong></a>
+  <a href="https://github.com/zhailan7796-boop/wishelp/releases/download/v0.3.3/TaskbarFollow-0.3.3-portable.zip"><strong>下载 Windows 便携版 ↓</strong></a>
   ·
   <a href="https://github.com/zhailan7796-boop/wishelp/releases">查看版本</a>
 </p>
-<p align="center">Windows 11 x64 · v0.3.2 · 解压即用</p>
+<p align="center">Windows 11 x64 · v0.3.3 · 解压即用</p>
 
 ## 少一次把窗口拖回来的动作
 
