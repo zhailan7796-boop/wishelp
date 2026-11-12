@@ -23,6 +23,7 @@ TestPeekFn TestPeek;
 StartFn Start; StopFn Stop; ArmFn Arm; StatusFn Status; EnableFn Enable;
 struct FixtureState {
     std::uint64_t hwnd, expected;
+    int savedX, savedY;
     volatile LONG ready, checking, paints, wrong, maxState, actions;
     volatile LONG64 firstTick;
     wchar_t desktop[128];
@@ -36,6 +37,10 @@ LRESULT CALLBACK FixtureProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
     if (message==WM_APP+2) {
         if (wparam) ShowWindow(hwnd,SW_MINIMIZE);
         else { SetActiveWindow(nullptr); SetActiveWindow(hwnd); }
+        InterlockedIncrement(&Fixture->actions); return 0;
+    }
+    if (message==WM_APP+3) {
+        SetWindowPos(hwnd,nullptr,Fixture->savedX,Fixture->savedY,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
         InterlockedIncrement(&Fixture->actions); return 0;
     }
     if (message==WM_PAINT) {
@@ -74,6 +79,7 @@ int RunFixture(int argc,wchar_t** argv) {
     DWORD desktopBytes{};
     GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,Fixture->desktop,sizeof(Fixture->desktop),&desktopBytes);
     const int mode=_wtoi(argv[3]), x=_wtoi(argv[4]), y=_wtoi(argv[5]);
+    Fixture->savedX=x; Fixture->savedY=y;
     Fixture->expected=_wcstoui64(argv[6],nullptr,10); Fixture->checking=mode==0?1:0;
     const bool maximized=_wtoi(argv[7])!=0, disabled=_wtoi(argv[8])!=0;
     if (argc>=11 && wcscmp(argv[10],L"-")!=0)
@@ -209,6 +215,31 @@ int wmain(int argc,wchar_t** argv) {
             Enable(TRUE);
         }
         Configure(8000,TRUE);
+        for (bool cancelled : {false,true}) {
+            Cancel(0); Child child;
+            Spawn(child,L"Local\\TaskbarFollow.RollbackTest."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(cancelled),
+                1,source,target,false,false);
+            HWND hwnd=reinterpret_cast<HWND>(static_cast<UINT_PTR>(child.state->hwnd));
+            NativeStatus before{}; Check(Status(&before,sizeof(before))!=FALSE,"before restore status");
+            Check(Arm(Executable().c_str(),hwnd,target)!=FALSE,"rollback restore arm failed");
+            PostMessageW(hwnd,WM_APP+1,0,0);
+            Wait([&] {return child.state->paints>0;});
+            Check(child.state->wrong==0,"restore did not paint first on target");
+            if (cancelled) Cancel(0);
+            PostMessageW(hwnd,WM_APP+3,0,0);
+            Wait([&] {return child.state->actions!=0;});
+            Check(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)==(cancelled?monitors[0]:target),
+                "post-show saved placement crossed monitors despite the current follow intent");
+            if (!cancelled) {
+                Wait([&] {NativeStatus status{}; return Status(&status,sizeof(status)) && status.firstShown>before.firstShown;});
+                PostMessageW(hwnd,WM_APP+3,0,0);
+                Wait([&] {return child.state->actions==2;});
+                Check(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)==monitors[0],
+                    "a completed intent still forced the old target");
+            }
+            puts(cancelled?"PASS native rollback: cancelled intent allows the later move"
+                :"PASS native rollback: stays on target after saved placement, then allows later moves");
+        }
         const wchar_t* exact=L"TaskbarFollow.Pwa.Exact";
         const wchar_t* other=L"TaskbarFollow.Pwa.Other";
         struct IdentityCase { const wchar_t* windowId; const wchar_t* processId; bool moves; const char* label; };

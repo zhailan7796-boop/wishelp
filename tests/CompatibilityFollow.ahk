@@ -52,6 +52,7 @@ class CompatibilityChecks {
         NumPut("uint64",11,"uint",101,snapshot,2592)
         NumPut("uint64",12,"uint",102,snapshot,2608)
         NumPut("uint64",2,"uint64",900,"uint64",9000,"uint",7,snapshot,3104)
+        NumPut("uint",1,snapshot,3132)
         return 1
     }
 }
@@ -68,7 +69,7 @@ class CompatibilityFixture extends NativeEngine {
     __New(warm := true) {
         this.Owner := CompatibilityOwner(), this.Handle := 1, this.Compatibility := 0, this.CompatibilityMoves := 0
         this.Now := 1000, this.Valid := true, this.Selected := CompatibilityChecks.Window()
-        this.Intent := {Serial:7,Flags:5,Id:"Fixture.App",Path:A_AhkPath,Monitor:2,Released:900,Expires:9000,
+        this.Intent := {Serial:7,Flags:5,Id:"Fixture.App",Path:A_AhkPath,Monitor:2,Released:900,Expires:9000,NativeClaimed:0,
             Candidates:warm ? [{Hwnd:11,Pid:101}] : []}
         this.Requests := [], this.Scheduled := false, this.ScheduleStarts := 0, this.NativeCancels := 0
         this.MoveResult := "requested", this.IntentReads := 0, this.CancelAtRead := 0
@@ -213,6 +214,24 @@ try {
     fixture := CompatibilityFixture(false), fixture.Intent.Flags := 7, fixture.Selected.Data.AppId := "Fixture.App"
     fixture.BeginCompatibility(7,2), CompatibilityChecks.Stable(fixture)
     CompatibilityChecks.Assert(fixture.Requests.Length = 1,"Cold shared-host selection accepts its exact visible AppID")
+
+    fixture := CompatibilityFixture(false), fixture.Intent.Flags := 11, fixture.BeginCompatibility(7,2)
+    CompatibilityChecks.NoRequest(fixture,"A packaged launch cannot use the executable alone")
+    fixture.Selected.Data.AppId := "Other.App"
+    CompatibilityChecks.NoRequest(fixture,"A different app sharing a package image cannot move")
+    fixture.Selected.Data.AppId := "Fixture.App"
+    CompatibilityChecks.Stable(fixture)
+    CompatibilityChecks.Assert(fixture.Requests.Length = 1,"An exact packaged window can follow after appearing from the background")
+    fixture.Selected.Monitor := CompatibilityChecks.Monitor(2)
+    fixture.Now += 50, fixture.CompatibilityTick()
+    CompatibilityChecks.Assert(fixture.CompatibilityMoves = 1 && !fixture.Scheduled,
+        "A packaged follow finishes only after the selected window reaches the target")
+    fixture := CompatibilityFixture(false), fixture.Intent.Flags := 11, fixture.Intent.NativeClaimed := 1
+    fixture.Selected.Data.AppId := "Fixture.App", fixture.BeginCompatibility(7,2)
+    CompatibilityChecks.NoRequest(fixture,"A native claim receives time to finish before fallback")
+    fixture.Valid := false, fixture.CompatibilityTick()
+    CompatibilityChecks.Assert(!fixture.Scheduled && !fixture.Requests.Length,"Native completion stops the package fallback")
+
     fixture := CompatibilityFixture(), fixture.BeginCompatibility(7,2)
     fixture.BeginCompatibility(7,2)
     CompatibilityChecks.Assert(fixture.ScheduleStarts = 1,"Duplicate delivery of one valid serial does not restart its timer")
@@ -312,7 +331,8 @@ try {
     callbacks.Push(intentCallback)
     decoder := {base:NativeEngine.Prototype,CompatibilityIntentFn:intentCallback}
     decoded := decoder.ReadCompatibilityIntent(7)
-    CompatibilityChecks.Assert(decoded.Serial = 7 && decoded.Monitor = 2 && decoded.Released = 900 && decoded.Expires = 9000,
+    CompatibilityChecks.Assert(decoded.Serial = 7 && decoded.Monitor = 2 && decoded.Released = 900 && decoded.Expires = 9000
+        && decoded.NativeClaimed = 1,
         "The real compatibility decoder reads native transaction fields from the agreed ABI offsets")
     CompatibilityChecks.Assert(decoded.Flags = 5 && decoded.Id == "Fixture.App" && decoded.Path == A_AhkPath,
         "The real compatibility decoder preserves launch path and opaque identity")

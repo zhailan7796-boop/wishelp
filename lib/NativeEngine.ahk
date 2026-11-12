@@ -1,6 +1,7 @@
 ; Native hooks own input capture and before-show positioning for 64-bit apps.
-; A verified 32-bit click has a separate, bounded after-show compatibility path.
+; After-show checks are bounded to a verified 32-bit click or packaged launch.
 class NativeEngine {
+    static PackagedFollowFlag := 8, AfterShowFlags := 4 | 8
     static Exports() => ["Start", "StopAndWait", "Configure", "SetEnabled", "Cancel", "PublishCache", "Status",
         "SetPeekEnabled", "ShowPeek", "HidePeek", "HoverCandidates", "AccessibleName", "CompatibilityIntent", "CancelCompatibility"]
     static DllPath() {
@@ -125,7 +126,8 @@ class NativeEngine {
         if !this.Handle || !this.Owner.Enabled
             return false
         intent := this.ReadCompatibilityIntent(serial), now := this.CompatibilityNow()
-        if !IsObject(intent) || intent.Serial != serial || intent.Monitor != monitorHandle || !(intent.Flags & 4) || now >= intent.Expires
+        if !IsObject(intent) || intent.Serial != serial || intent.Monitor != monitorHandle
+            || !(intent.Flags & NativeEngine.AfterShowFlags) || now >= intent.Expires
             return false
         target := this.CompatibilityMonitor(intent.Monitor)
         if !IsObject(target)
@@ -137,16 +139,19 @@ class NativeEngine {
             ; bridge message must not replace a newer compatibility operation.
             fresh := this.ReadCompatibilityIntent(serial)
             if !this.Handle || !this.Owner.Enabled || !IsObject(fresh) || fresh.Serial != serial
-                || fresh.Monitor != monitorHandle || !(fresh.Flags & 4) || this.CompatibilityNow() >= fresh.Expires
+                || fresh.Monitor != monitorHandle || !(fresh.Flags & NativeEngine.AfterShowFlags) || this.CompatibilityNow() >= fresh.Expires
                 return false
             if IsObject(this.Compatibility) && this.Compatibility.Serial = serial
                 return true
             this.StopCompatibility()
+            packaged := !!(fresh.Flags & NativeEngine.PackagedFollowFlag)
+            label := packaged ? "应用包窗口补充定位" : "32位兼容定位"
             this.Compatibility := {Serial:serial,Target:target,Expires:fresh.Expires,Hwnd:0,Pid:0,Since:0,
-                Requested:false,RequestedAt:0}
+                Requested:false,RequestedAt:0,Label:label,
+                LogLabel:packaged ? "packaged follow" : "32-bit compatibility"}
             this.CompatibilitySchedule(true)
         } finally Critical(previousCritical ? previousCritical : "Off")
-        this.Owner.ReportActivity("已接到32位应用的任务栏点击，正在等待所选窗口显示后进行兼容定位。")
+        this.Owner.ReportActivity(label . "正在等待所选窗口显示。")
         return true
     }
     ReadCompatibilityIntent(serial) {
@@ -162,7 +167,7 @@ class NativeEngine {
         return {Id:StrGet(snapshot.Ptr+32,256),Path:StrGet(snapshot.Ptr+544,1024),
             Flags:NumGet(snapshot,24,"uint"),Candidates:candidates,Monitor:NumGet(snapshot,3104,"uint64"),
             Released:NumGet(snapshot,3112,"uint64"),Expires:NumGet(snapshot,3120,"uint64"),
-            Serial:NumGet(snapshot,3128,"uint")}
+            Serial:NumGet(snapshot,3128,"uint"),NativeClaimed:NumGet(snapshot,3132,"uint")}
     }
     CompatibilityNow() => Desktop.Tick()
     CompatibilityMonitor(handle) => Desktop.Monitor(handle)
@@ -175,7 +180,9 @@ class NativeEngine {
             Visible:DllCall("user32\IsWindowVisible","ptr",hwnd),Minimized:Desktop.IsMin(hwnd),
             Monitor:Desktop.MonitorOf(hwnd)}
     }
-    CompatibilityMove(hwnd,target) => WindowMover.Move(hwnd,target)
+    CompatibilityMove(hwnd,target) => Desktop.Foreground() = hwnd && Desktop.Pid(hwnd) = this.Compatibility.Pid
+        ? WindowMover.Move(hwnd,target) : "focus-changed"
+    static CompatibilityDelay(intent) => (intent.Flags & NativeEngine.PackagedFollowFlag) && intent.NativeClaimed ? 500 : 80
     CompatibilityMatches(intent,window) {
         if !IsObject(window) || !window.Hwnd || !window.Data.Pid || !window.Visible || window.Minimized || !window.Eligible
             return false
@@ -227,6 +234,9 @@ class NativeEngine {
                 this.Owner.SuccessfulMoves += 1
             }
         } finally Critical(previousCritical ? previousCritical : "Off")
+        if success
+            try this.Owner.Log(state.LogLabel . " confirmed; id=" . current.Id . "; pid=" . state.Pid
+                . "; hwnd=" . state.Hwnd . "; target=" . state.Target.Device)
         if text != ""
             this.Owner.ReportActivity(text)
     }
@@ -242,10 +252,10 @@ class NativeEngine {
             intent := this.ReadCompatibilityIntent(state.Serial), now := this.CompatibilityNow()
             if !this.CompatibilityCurrent(state)
                 return
-            if !IsObject(intent) || intent.Serial != state.Serial || !(intent.Flags & 4) || now >= intent.Expires {
+            if !IsObject(intent) || intent.Serial != state.Serial || !(intent.Flags & NativeEngine.AfterShowFlags) || now >= intent.Expires {
                 this.StopCompatibility(state)
                 if now >= state.Expires
-                    this.Owner.ReportActivity("32位兼容定位等待已结束，尚未确认所选窗口到达目标屏幕。")
+                    this.Owner.ReportActivity(state.Label . "等待已结束，尚未确认所选窗口到达目标屏幕。")
                 return
             }
             if !Desktop.Unchanged(state.Target,this.CompatibilityMonitor(intent.Monitor)) {
@@ -255,30 +265,30 @@ class NativeEngine {
             window := this.CompatibilityForeground()
             if !this.CompatibilityMatches(intent,window) {
                 if state.Requested
-                    this.EndCompatibility(state,"32位兼容定位已结束，所选窗口已隐藏、最小化或切换焦点。")
+                    this.EndCompatibility(state,state.Label . "已结束，所选窗口已隐藏、最小化或切换焦点。")
                 else
                     state.Hwnd := 0, state.Pid := 0, state.Since := 0
                 return
             }
             if state.Requested {
                 if window.Hwnd != state.Hwnd || window.Data.Pid != state.Pid {
-                    this.EndCompatibility(state,"32位兼容定位已结束，所选窗口已发生变化。")
+                    this.EndCompatibility(state,state.Label . "已结束，所选窗口已发生变化。")
                     return
                 }
                 if Desktop.SameMonitor(window.Monitor,state.Target)
-                    this.EndCompatibility(state,"已完成32位兼容定位：已显示的所选窗口现已位于点击的屏幕。",true)
+                    this.EndCompatibility(state,state.Label . "已完成，窗口已在点击的屏幕。",true)
                 else if now-state.RequestedAt >= 1000
-                    this.EndCompatibility(state,"32位兼容定位未能确认目标位置，已停止继续尝试。")
+                    this.EndCompatibility(state,state.Label . "未能确认目标位置，已停止继续尝试。")
                 return
             }
             if state.Hwnd != window.Hwnd || state.Pid != window.Data.Pid {
                 state.Hwnd := window.Hwnd, state.Pid := window.Data.Pid, state.Since := now
                 return
             }
-            if now-state.Since < 80
+            if now-state.Since < NativeEngine.CompatibilityDelay(intent)
                 return
             if Desktop.SameMonitor(window.Monitor,state.Target) {
-                this.EndCompatibility(state,"32位应用的所选窗口已在点击的屏幕上，保留系统行为。")
+                this.EndCompatibility(state,"所选窗口已在点击的屏幕上。")
                 return
             }
             ; Window identity queries can dispatch messages. Finish those before
@@ -299,11 +309,11 @@ class NativeEngine {
                 if !this.CompatibilityCurrent(state)
                     return
                 if !IsObject(fresh) || fresh.Serial != state.Serial || fresh.Monitor != state.Target.Handle
-                    || !(fresh.Flags & 4) || this.CompatibilityNow() >= fresh.Expires {
+                    || !(fresh.Flags & NativeEngine.AfterShowFlags) || this.CompatibilityNow() >= fresh.Expires {
                     this.StopCompatibility(state)
                     return
                 }
-                if !this.CompatibilityMatches(fresh,selected)
+                if now-state.Since < NativeEngine.CompatibilityDelay(fresh) || !this.CompatibilityMatches(fresh,selected)
                     return
                 result := this.CompatibilityMove(state.Hwnd,state.Target)
                 if result = "requested"
@@ -311,14 +321,15 @@ class NativeEngine {
             } finally Critical(previousCritical ? previousCritical : "Off")
             if result != "requested" {
                 this.EndCompatibility(state,result = "already-there"
-                    ? "32位应用的所选窗口已在点击的屏幕上，保留系统行为。"
-                    : "32位兼容定位请求未完成，已保留系统行为。")
+                    ? "所选窗口已在点击的屏幕上。"
+                    : state.Label . "请求未完成。")
                 return
             }
-            this.Owner.Log("32-bit compatibility requested; pid=" . state.Pid . "; hwnd=" . state.Hwnd . "; target=" . state.Target.Device)
+            this.Owner.Log(state.LogLabel . " requested; id=" . fresh.Id . "; pid=" . state.Pid
+                . "; hwnd=" . state.Hwnd . "; target=" . state.Target.Device)
         } catch as e {
             this.StopCompatibility(state)
-            try this.Owner.Log("32-bit compatibility error: " . e.Message . "; line=" . e.Line)
+            try this.Owner.Log(state.LogLabel . " error: " . e.Message . "; line=" . e.Line)
         }
     }
     Stop(timeoutMs := 3000) {
@@ -466,10 +477,13 @@ class NativeEngine {
             path := ""
         cold := path != "" && index.IsExecutable(path)
         requireId := cold && index.RequiresAppId(id,path)
-        compatibility := cold && index.BinaryType(path) = 0
+        binaryType := cold ? index.BinaryType(path) : -1
+        compatibility := binaryType = 0
+        packagedFollow := binaryType = 6 && !candidates.Length && WindowIdentity.PackageId(id)
         ; Retain unsupported buttons too: an explicit click should report why it
         ; was skipped, not vanish from the cache without any status/log feedback.
-        return {Id:id,Path:path,Candidates:candidates,Flags:(cold?1:0)|(requireId?2:0)|(compatibility?4:0)}
+        return {Id:id,Path:path,Candidates:candidates,
+            Flags:(cold?1:0)|(requireId?2:0)|(compatibility?4:0)|(packagedFollow?NativeEngine.PackagedFollowFlag:0)}
     }
     Poll() {
         status := Buffer(168,0)
@@ -491,8 +505,8 @@ class NativeEngine {
         static messages := Map(1,"已接到任务栏点击，等待 Windows 创建或恢复对应窗口。",
             2,"已在窗口创建时指定点击的屏幕，等待首次显示。",
             3,"已在窗口恢复显示前准备好目标位置。",
-            4,"已在窗口激活前直接定位，保持当前窗口状态。",
-            5,"已确认：窗口首次显示时已位于目标屏幕。",
+            4,"已确认激活的窗口稳定在点击的屏幕。",
+            5,"已确认启动或恢复的窗口稳定在点击的屏幕。",
             6,"你开始了其他操作，已取消尚未完成的定位。",
             7,"任务栏已展开多个窗口，请选择需要唤起的那个。",
             8,"此应用暂不支持原生定位，本次保留系统行为。",
@@ -501,8 +515,9 @@ class NativeEngine {
             12,"正在当前屏幕显示悬停预览，移开鼠标即关闭；原窗口保持原位。",
             13,"悬停预览已关闭，原窗口位置和最小化状态保持不变。",
             16,"应用未接受目标位置，本次未确认定位成功。")
-        if kind = 1 && IsObject(this.Compatibility)
-            this.Owner.ReportActivity("已接到32位应用的任务栏点击，正在等待所选窗口显示后进行兼容定位。")
+        state := this.Compatibility
+        if kind = 1 && IsObject(state)
+            this.Owner.ReportActivity(state.Label . "正在等待所选窗口显示。")
         else if messages.Has(kind)
             this.Owner.ReportActivity(messages[kind])
     }

@@ -23,6 +23,10 @@ class AppIdentityChecks {
 config := A_Temp . "\TaskbarFollow-AppIdentity-" . DllCall("kernel32\GetCurrentProcessId", "uint") . ".ini"
 nonImage := config . ".exe"
 aliasConfig := config . ".alias.ini"
+packageRoot := config . ".package"
+packageImage := packageRoot . "\app\Fixture.exe"
+escapedImage := config . ".outside.exe"
+manifest := packageRoot . "\AppxManifest.xml"
 exitCode := 0
 try {
     id := "Microsoft.Windows.Explorer", systemPath := A_WinDir . "\explorer.exe"
@@ -71,6 +75,30 @@ try {
     AppIdentityChecks.Equal(architecture.BinaryType(nonImage . ".missing"), -1, "A failed binary query remains an unknown architecture")
     AppIdentityChecks.Assert(architecture.BinaryType(nonImage) != 0, "An inert text fixture is not classified as a 32-bit Windows image")
     AppIdentityChecks.Equal(NativeEngine.ResolveEntry(nonImage, [], ids).Flags, 1, "An existing non-image does not get a guessed 32-bit compatibility flag")
+
+    ; A package may expose multiple app IDs and share an image between them.
+    DirCreate(packageRoot . "\app")
+    FileCopy(x64Path,packageImage)
+    FileCopy(x64Path,escapedImage)
+    SplitPath(escapedImage,&escapedLeaf)
+    FileAppend('<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"><Applications>'
+        . '<Application Id="Entry" Executable="app/Fixture.exe"/><Application Id="Secondary" Executable="app/Fixture.exe"/>'
+        . '<Application Id="Outside" Executable="../' . escapedLeaf . '"/>'
+        . '</Applications></Package>',manifest,"UTF-8")
+    AppIdentityChecks.Equal(WindowIdentity.ManifestExecutable(packageRoot,"Entry"),packageImage,
+        "The exact manifest entry resolves its relative executable")
+    AppIdentityChecks.Equal(WindowIdentity.ManifestExecutable(packageRoot,"entry"),"","Package app IDs remain case-sensitive")
+    AppIdentityChecks.Equal(WindowIdentity.ManifestExecutable(packageRoot,"Missing"),"","An absent app cannot borrow a sibling's image")
+    AppIdentityChecks.Equal(WindowIdentity.ManifestExecutable(packageRoot,"Outside"),"","A package entry cannot escape the installed directory")
+    packagedId := "TaskbarFollow.IdentityFixture_0000000000000!Entry"
+    AppIdentityChecks.Equal(NativeEngine.ResolveEntry(packagedId, [], ids).Flags,0,"An unregistered package is not a verified launch identity")
+    ids.Mappings[packagedId] := packageImage
+    packaged := NativeEngine.ResolveEntry(packagedId, [], ids)
+    AppIdentityChecks.Equal(packaged.Flags,11,"A packaged cold launch has an exact-ID native route and bounded after-show fallback")
+    warmPackage := NativeEngine.ResolveEntry(packagedId,[AppIdentityChecks.Window(6,packagedId,packageImage)],ids)
+    AppIdentityChecks.Equal(warmPackage.Flags,3,"A known packaged window stays on the existing native route")
+    AppIdentityChecks.Assert(!ids.Match(packagedId,{AppId:"TaskbarFollow.IdentityFixture_0000000000000!Secondary",
+        Path:packageImage,Exe:"Fixture.exe"}),"A different entry sharing a package image cannot match")
 
     videoId := "TencentVideo.QQLive.v1"
     IniWrite(x86Path, aliasConfig, "AppIdAlias", videoId)
@@ -129,5 +157,13 @@ try {
         FileDelete(nonImage)
     if FileExist(aliasConfig)
         FileDelete(aliasConfig)
+    for fixtureFile in [manifest,packageImage,escapedImage] {
+        if FileExist(fixtureFile)
+            FileDelete(fixtureFile)
+    }
+    if DirExist(packageRoot . "\app")
+        DirDelete(packageRoot . "\app")
+    if DirExist(packageRoot)
+        DirDelete(packageRoot)
 }
 ExitApp(exitCode)

@@ -157,6 +157,7 @@ class WindowIdentity {
     __New(configPath := "", loadShortcuts := true) {
         this.Mappings := Map(), this.Mappings.CaseSense := true
         this.NativePaths := Map(), this.NativePaths.CaseSense := true
+        this.PackagePaths := Map(), this.PackagePaths.CaseSense := true
         this.Pwas := Map(), this.Pwas.CaseSense := true
         this.Aliases := Map(), this.Aliases.CaseSense := true
         this.AliasPaths := Map()
@@ -307,6 +308,8 @@ class WindowIdentity {
         if this.Pwas.Has(id)
             return this.Pwas[id].Host
         mapped := this.Mappings.Has(id) ? this.Mappings[id] : ""
+        if mapped = "" && IsObject(package := WindowIdentity.PackageId(id))
+            return this.PackagedPath(id,package)
         if InStr(mapped, "\")
             return FileExist(mapped) && RegExMatch(mapped,"i)^[a-z]:\\.*\.exe$") ? mapped : ""
         if this.NativePaths.Has(id) {
@@ -326,11 +329,68 @@ class WindowIdentity {
         }
         return ""
     }
+    static PackageId(id) => RegExMatch(id,"i)^([a-z0-9.-]+_[a-z0-9]{13})!([a-z0-9.-]+)$",&parts) ? parts : 0
+    PackagedPath(id,package) {
+        now := Desktop.Tick()
+        if this.PackagePaths.Has(id) {
+            cached := this.PackagePaths[id]
+            if now - cached.At < 10000 && (cached.Path = "" || FileExist(cached.Path))
+                return cached.Path
+        }
+        path := ""
+        try path := WindowIdentity.RegisteredPackageExecutable(package[1],package[2])
+        this.PackagePaths[id] := {Path:path,At:now}
+        return path
+    }
+    static RegisteredPackageExecutable(family,appId) {
+        count := 0, chars := 0
+        code := DllCall("kernel32\GetPackagesByPackageFamily","wstr",family,"uint*",&count,"ptr",0,
+            "uint*",&chars,"ptr",0,"int")
+        if code != 122 || !count || !chars
+            return ""
+        names := Buffer(count*A_PtrSize), text := Buffer(chars*2)
+        if DllCall("kernel32\GetPackagesByPackageFamily","wstr",family,"uint*",&count,"ptr",names,
+            "uint*",&chars,"ptr",text,"int") != 0
+            return ""
+        path := ""
+        Loop count {
+            name := StrGet(NumGet(names,(A_Index-1)*A_PtrSize,"ptr"))
+            chars := 1024, root := Buffer(chars*2)
+            if DllCall("kernel32\GetPackagePathByFullName","wstr",name,"uint*",&chars,"ptr",root,"int") != 0
+                continue
+            candidate := WindowIdentity.ManifestExecutable(StrGet(root),appId)
+            if candidate = ""
+                continue
+            if path != "" && StrLower(candidate) != StrLower(path)
+                return "" ; conflicting installed launch paths cannot identify a unique image
+            path := candidate
+        }
+        return path
+    }
+    static ManifestExecutable(root,appId) {
+        manifest := ComObject("Msxml2.DOMDocument.6.0")
+        manifest.async := false
+        manifest.resolveExternals := false
+        manifest.setProperty("ProhibitDTD",true)
+        directory := RTrim(root,"\") . "\"
+        if !manifest.load(directory . "AppxManifest.xml")
+            return ""
+        for app in manifest.selectNodes("/*[local-name()='Package']/*[local-name()='Applications']/*[local-name()='Application']") {
+            if !(app.getAttribute("Id") == appId)
+                continue
+            relative := app.getAttribute("Executable")
+            if Type(relative) != "String" || relative = ""
+                return ""
+            path := WindowIdentity.VerifiedAliasPath(directory . StrReplace(relative,"/","\"))
+            return InStr(path,directory) = 1 ? path : ""
+        }
+        return ""
+    }
     NativeRequiresAppId(id,path) {
         ; A shared host is not a unique launch identity (browser profiles/PWAs,
         ; multiple shortcuts for one executable). Resolve it inside the payload
         ; using the real window/process AppID, never the executable name alone.
-        if this.Pwas.Has(id)
+        if this.Pwas.Has(id) || WindowIdentity.PackageId(id)
             return true
         canonical := this.CanonicalId(id)
         for other,pwa in this.Pwas {
@@ -553,7 +613,7 @@ class NativeIdentityIndex {
         return this.BinaryTypes[key]
     }
     RequiresAppId(id,path) {
-        if this.Identity.Pwas.Has(id)
+        if this.Identity.Pwas.Has(id) || WindowIdentity.PackageId(id)
             return true
         canonical := this.Identity.CanonicalId(id)
         if NativeIdentityIndex.HasOtherOwner(this.PathOwners,this.Normalize(path),canonical)

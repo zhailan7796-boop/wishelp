@@ -13,6 +13,7 @@
 namespace {
 constexpr DWORD Magic = 0x54464E32;
 constexpr UINT_PTR SubclassId = 0x54464E32;
+constexpr std::uint64_t PlacementSettleMs = 250;
 struct Transaction {
     NativeEntry entry;
     MONITORINFOEXW target;
@@ -201,10 +202,12 @@ RECT MaxRect(HWND hwnd,const Transaction& tx) {
 struct Placement {
     Transaction tx;
     RECT normal;
-    bool wantsMax{}, shown{}, removed{};
+    bool wantsMax{}, removed{};
     unsigned calls{};
     bool pendingIdentity{};
     bool activationOnly{};
+    std::uint64_t verifyAt{};
+    bool retried{};
 };
 bool ExactWindowIdentity(HWND hwnd,const wchar_t* expected) {
     static const PROPERTYKEY key={{0x9f4c2855,0x9f79,0x4b39,{0xa8,0xd0,0xe1,0xd4,0x2d,0xe1,0xd5,0xf3}},5};
@@ -238,6 +241,59 @@ bool StillCurrent(Shared* shared,const Transaction& tx) {
     return Snapshot(shared,current) && current.serial==tx.serial;
 }
 void RemovePlacement(HWND hwnd,Placement* placement);
+bool VisibleRectOnTarget(HWND hwnd,const Transaction& tx,RECT& rect) {
+    if (IsZoomed(hwnd)) { rect=MaxRect(hwnd,tx); return true; }
+    MONITORINFO source{sizeof(source)};
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&source) || !GetWindowRect(hwnd,&rect))
+        return false;
+    rect=MapRect(rect,source.rcWork,tx.target.rcWork);
+    return true;
+}
+bool PositionLeavesTarget(HWND hwnd,const WINDOWPOS& position,HMONITOR target) {
+    if (position.flags&SWP_NOMOVE) return false;
+    LONG width=position.cx,height=position.cy;
+    if (position.flags&SWP_NOSIZE) {
+        RECT current{};
+        if (!GetWindowRect(hwnd,&current)) return false;
+        width=current.right-current.left; height=current.bottom-current.top;
+    }
+    const RECT proposed{position.x,position.y,position.x+width,position.y+height};
+    return MonitorFromRect(&proposed,MONITOR_DEFAULTTONEAREST)!=target;
+}
+void VerifyPlacement(Shared* shared,HWND hwnd,Placement* placement) {
+    const std::uint64_t now=Now();
+    if (!placement->verifyAt || now<placement->verifyAt) return;
+    const Transaction& tx=placement->tx;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        CancelTransaction(shared,tx);
+        RemovePlacement(hwnd,placement);
+        return;
+    }
+    const bool onTarget=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)==Monitor(tx.monitor);
+    RECT rect{};
+    // Some moves bypass WM_WINDOWPOSCHANGING. Retry at most once, for the
+    // same visible foreground window and only while the click is still fresh.
+    if (!onTarget && !placement->retried && now-placement->verifyAt<=PlacementSettleMs
+        && GetForegroundWindow()==hwnd && VisibleRectOnTarget(hwnd,tx,rect) && StillCurrent(shared,tx)) {
+        placement->normal=rect;
+        placement->retried=true;
+        placement->verifyAt=now+PlacementSettleMs;
+        Reentry=true;
+        SetWindowPos(hwnd,nullptr,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+            SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
+        Reentry=false;
+        return;
+    }
+    if (CancelTransaction(shared,tx)) {
+        if (!onTarget) Event(shared,TF_POSITION_REJECTED,hwnd,&tx);
+        else if (placement->activationOnly) {
+            InterlockedIncrement64(&shared->activated); Event(shared,TF_ACTIVATE,hwnd,&tx);
+        } else {
+            InterlockedIncrement64(&shared->firstShown); Event(shared,TF_FIRST_SHOW,hwnd,&tx);
+        }
+    }
+    RemovePlacement(hwnd,placement);
+}
 LRESULT CALLBACK PlacementProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam,UINT_PTR,DWORD_PTR reference) {
     auto* placement=reinterpret_cast<Placement*>(reference);
     PlacementCall call(placement);
@@ -250,7 +306,10 @@ LRESULT CALLBACK PlacementProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lpara
         RemovePlacement(hwnd,placement);
         return DefSubclassProc(hwnd,message,wparam,lparam);
     }
-    if (message==WM_TIMER && wparam==SubclassId) return 0;
+    if (message==WM_TIMER && wparam==SubclassId) {
+        if (placement->calls==1 && !Reentry) VerifyPlacement(shared,hwnd,placement);
+        return 0;
+    }
     const LRESULT result=DefSubclassProc(hwnd,message,wparam,lparam);
     if (placement->removed) return result;
     // Application handlers can pump messages or synchronously ask the
@@ -274,13 +333,19 @@ LRESULT CALLBACK PlacementProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lpara
             return result;
         }
     }
-    if (message==WM_WINDOWPOSCHANGING && !placement->shown
-        && (!Reentry || (placement->activationOnly && placement->calls==1))) {
+    const bool directPosition=Reentry && ((placement->activationOnly && placement->calls==1)
+        || (placement->retried && placement->calls==2));
+    if (message==WM_WINDOWPOSCHANGING && (!Reentry || directPosition)) {
         auto* position=reinterpret_cast<WINDOWPOS*>(lparam);
-        if (!(position->flags&SWP_HIDEWINDOW)) {
+        // Show/restore can immediately reapply saved geometry after the first
+        // visible placement. During verification, allow moves within the target
+        // and only protect against a return to a different monitor.
+        if (!(position->flags&SWP_HIDEWINDOW) && (!placement->verifyAt || directPosition
+            || (Now()<placement->verifyAt && IsWindowVisible(hwnd) && !IsIconic(hwnd)
+                && PositionLeavesTarget(hwnd,*position,Monitor(placement->tx.monitor))))) {
             const WINDOWPOS original=*position;
             RECT wanted=placement->normal;
-            if (placement->wantsMax || IsZoomed(hwnd)) wanted=MaxRect(hwnd,placement->tx);
+            if ((!placement->verifyAt && placement->wantsMax) || IsZoomed(hwnd)) wanted=MaxRect(hwnd,placement->tx);
             else if (!(position->flags&SWP_NOSIZE) && position->cx>=160 && position->cy>=100) {
                 wanted.right=wanted.left+std::min<LONG>(position->cx,placement->tx.target.rcWork.right-placement->tx.target.rcWork.left);
                 wanted.bottom=wanted.top+std::min<LONG>(position->cy,placement->tx.target.rcWork.bottom-placement->tx.target.rcWork.top);
@@ -298,22 +363,13 @@ LRESULT CALLBACK PlacementProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lpara
                 position->flags|=SWP_NOCOPYBITS;
             }
         }
-    } else if (message==WM_GETMINMAXINFO && placement->wantsMax) {
+    } else if (message==WM_GETMINMAXINFO && placement->wantsMax && !placement->verifyAt) {
         auto* info=reinterpret_cast<MINMAXINFO*>(lparam); RECT r=MaxRect(hwnd,placement->tx);
         info->ptMaxPosition={r.left-placement->tx.target.rcMonitor.left,r.top-placement->tx.target.rcMonitor.top};
         info->ptMaxSize={r.right-r.left,r.bottom-r.top};
-    } else if (message==WM_WINDOWPOSCHANGED && IsWindowVisible(hwnd) && !IsIconic(hwnd)
+    } else if (message==WM_WINDOWPOSCHANGED && !placement->verifyAt && IsWindowVisible(hwnd) && !IsIconic(hwnd)
         && (!placement->activationOnly || placement->calls==1)) {
-        placement->shown=true;
-        const bool onTarget=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)==Monitor(placement->tx.monitor);
-        if (CancelTransaction(shared,placement->tx) && onTarget) {
-            if (placement->activationOnly) {
-                InterlockedIncrement64(&shared->activated); Event(shared,TF_ACTIVATE,hwnd,&placement->tx);
-            } else {
-                InterlockedIncrement64(&shared->firstShown); Event(shared,TF_FIRST_SHOW,hwnd,&placement->tx);
-            }
-        }
-        RemovePlacement(hwnd,placement);
+        placement->verifyAt=Now()+PlacementSettleMs;
     }
     return result;
 }
@@ -330,7 +386,7 @@ bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendi
         if (old->tx.serial==tx.serial && old->tx.epoch==tx.epoch) return true;
         PlacementCall call(old); RemovePlacement(hwnd,old);
     }
-    auto* placement=new(std::nothrow) Placement{tx,normal,wantsMax,false};
+    auto* placement=new(std::nothrow) Placement{tx,normal,wantsMax};
     if (!placement) return false;
     placement->pendingIdentity=pendingIdentity;
     placement->activationOnly=activationOnly;
@@ -343,7 +399,9 @@ bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendi
         || !SetWindowSubclass(hwnd,PlacementProc,SubclassId,reinterpret_cast<DWORD_PTR>(placement))) {
         delete placement; return false;
     }
-    SetTimer(hwnd,SubclassId,100,nullptr); return true;
+    if (SetTimer(hwnd,SubclassId,100,nullptr)) return true;
+    PlacementCall call(placement); RemovePlacement(hwnd,placement);
+    return false;
 }
 RECT NormalOnTarget(HWND hwnd,const Transaction& tx,WINDOWPLACEMENT& wp) {
     MONITORINFO source{sizeof(source)};
@@ -372,10 +430,8 @@ bool PositionVisible(Shared* shared,HWND hwnd,const Transaction& tx) {
         if (CancelTransaction(shared,tx)) Event(shared,TF_SAME_SCREEN,hwnd,&tx);
         return false;
     }
-    MONITORINFO source{sizeof(source)}; GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&source);
-    RECT r{}; GetWindowRect(hwnd,&r);
-    r=IsZoomed(hwnd) ? MaxRect(hwnd,tx) : MapRect(r,source.rcWork,tx.target.rcWork);
-    if (!Attach(hwnd,tx,r,IsZoomed(hwnd)!=FALSE,false,true)) return false;
+    RECT r{};
+    if (!VisibleRectOnTarget(hwnd,tx,r) || !Attach(hwnd,tx,r,IsZoomed(hwnd)!=FALSE,false,true)) return false;
     Reentry=true;
     const BOOL moved=SetWindowPos(hwnd,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
     Reentry=false;
@@ -384,7 +440,10 @@ bool PositionVisible(Shared* shared,HWND hwnd,const Transaction& tx) {
         DWORD_PTR current{};
         if (GetWindowSubclass(hwnd,PlacementProc,SubclassId,&current)) {
             auto* placement=reinterpret_cast<Placement*>(current);
-            PlacementCall call(placement); RemovePlacement(hwnd,placement);
+            if (placement->tx.serial==tx.serial && placement->tx.epoch==tx.epoch) {
+                if (moved && placement->verifyAt) return false; // defer the outcome to verification
+                PlacementCall call(placement); RemovePlacement(hwnd,placement);
+            }
         }
         if (CancelTransaction(shared,tx)) Event(shared,TF_POSITION_REJECTED,hwnd,&tx);
     }
@@ -453,9 +512,8 @@ LRESULT CALLBACK ObserveMessages(int code,WPARAM wparam,LPARAM lparam) {
         const auto* message=reinterpret_cast<const CWPSTRUCT*>(lparam);
         if (message->message==WM_SHOWWINDOW && message->wParam) {
             Shared* shared=GetShared(); Transaction tx;
-            // A reused hidden window is already visible by HCBT_ACTIVATE.
-            // Observe its real show notification while it is still hidden,
-            // then protect the following placement before its first paint.
+            // Observe a reused window's show notification while it is still
+            // hidden, then protect the following placement before first paint.
             if (Snapshot(shared,tx) && !(tx.entry.flags&TF_COMPATIBILITY) && !tx.preview
                 && Eligible(message->hwnd) && ColdExistingMatches(tx,message->hwnd)
                 && StillCurrent(shared,tx) && Claim(shared,tx,message->hwnd)) {
@@ -537,11 +595,9 @@ bool ReleaseEntry(Shared* shared,const NativeEntry& entry,HMONITOR target,HWND b
     }
     if (!entry.count && !(entry.flags&TF_COLD_START)) { Event(shared,TF_UNSUPPORTED); return false; }
     Arm(shared,entry,target,before,preview);
-    if (entry.flags&TF_COMPATIBILITY) {
-        if (!ControllerOwner || !PostMessageW(ControllerOwner,CompatibilityCommand,
-            static_cast<WPARAM>(Read32(shared->serial)),reinterpret_cast<LPARAM>(target))) {
-            Cancel(shared); Event(shared,TF_UNSUPPORTED); return false;
-        }
+    if ((entry.flags&TF_AFTER_SHOW) && (!ControllerOwner || !PostMessageW(ControllerOwner,CompatibilityCommand,
+        static_cast<WPARAM>(Read32(shared->serial)),reinterpret_cast<LPARAM>(target))) && (entry.flags&TF_COMPATIBILITY)) {
+        Cancel(shared); Event(shared,TF_UNSUPPORTED); return false;
     }
     return true;
 }
@@ -895,15 +951,18 @@ BOOL TF_Status(NativeStatus* status,unsigned bytes) {
 BOOL TF_CompatibilityIntent(unsigned serial,NativeIntent* intent,unsigned bytes) {
     if (!Controller.data || !intent || bytes!=sizeof(*intent)) return FALSE;
     Transaction tx;
-    if (!Snapshot(Controller.data,tx) || tx.serial!=serial || !(tx.entry.flags&TF_COMPATIBILITY)) return FALSE;
+    if (!Snapshot(Controller.data,tx) || tx.serial!=serial || !(tx.entry.flags&TF_AFTER_SHOW)) return FALSE;
+    const auto claim=static_cast<std::uint64_t>(Read64(Controller.data->claim));
     ZeroMemory(intent,sizeof(*intent));
     intent->entry=tx.entry; intent->monitor=tx.monitor; intent->released=tx.released;
-    intent->expires=tx.expires; intent->serial=tx.serial; return TRUE;
+    intent->expires=tx.expires; intent->serial=tx.serial;
+    intent->nativeClaimed=(claim>>32)==tx.serial && static_cast<unsigned>(claim)!=0;
+    return TRUE;
 }
 BOOL TF_CancelCompatibility(unsigned serial) {
     if (!Controller.data) return FALSE;
     Transaction tx;
-    return Snapshot(Controller.data,tx) && tx.serial==serial && (tx.entry.flags&TF_COMPATIBILITY)
+    return Snapshot(Controller.data,tx) && tx.serial==serial && (tx.entry.flags&TF_AFTER_SHOW)
         && CancelTransaction(Controller.data,tx);
 }
 BOOL TF_TestReleaseEntry(const NativeEntry* entry,HMONITOR target,BOOL preview) {

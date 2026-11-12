@@ -7,6 +7,8 @@ constexpr unsigned TF_MAX_WINDOWS = 32;
 constexpr unsigned TF_COLD_START = 1;
 constexpr unsigned TF_REQUIRE_APP_ID = 2;
 constexpr unsigned TF_COMPATIBILITY = 4; // explicit-click, after-show routing for x86 applications
+constexpr unsigned TF_PACKAGED_FOLLOW = 8; // after-show backup for a packaged launch without a cached window
+constexpr unsigned TF_AFTER_SHOW = TF_COMPATIBILITY | TF_PACKAGED_FOLLOW;
 constexpr unsigned TF_TEST_MODE = 1;
 struct NativeCandidate { std::uint64_t hwnd; std::uint32_t pid, reserved; };
 struct alignas(8) NativeEntry {
@@ -28,7 +30,7 @@ static_assert(sizeof(NativeStatus) == 168, "AHK status ABI");
 struct alignas(8) NativeIntent {
     NativeEntry entry;
     std::uint64_t monitor, released, expires;
-    std::uint32_t serial, reserved;
+    std::uint32_t serial, nativeClaimed;
 };
 static_assert(sizeof(NativeIntent) == 3136, "AHK compatibility intent ABI");
 enum NativeEvent : unsigned { TF_ARMED=1, TF_CREATE=2, TF_RESTORE=3, TF_ACTIVATE=4,

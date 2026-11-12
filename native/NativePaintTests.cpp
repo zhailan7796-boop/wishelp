@@ -228,6 +228,14 @@ BOOL CALLBACK Collect(HMONITOR monitor,HDC,LPRECT,LPARAM pointer) {
 using StartFn=BOOL(*)(HWND,unsigned);
 using StopFn=BOOL(*)(unsigned);
 using StatusFn=BOOL(*)(NativeStatus*,unsigned);
+bool WaitForActivation(StatusFn status,NativeStatus& after,std::uint64_t before) {
+    const ULONGLONG until=GetTickCount64()+2000;
+    do {
+        if (status(&after,sizeof(after)) && after.activated>before) return true;
+        DrainMessages(); Sleep(10);
+    } while (GetTickCount64()<until);
+    return false;
+}
 }
 int wmain(int argc,wchar_t** argv) {
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -281,7 +289,7 @@ int wmain(int argc,wchar_t** argv) {
                     child.state->interruptMode=0; ResetEvent(child.observed);
                     Check(PostMessageW(child.Window(),PlacementMessage,0,0)!=FALSE,"replacement intent activation command");
                     WaitForFixture(child.observed,child.process,"replacement intent observation handshake");
-                    Check(Status(&after,sizeof(after)) && after.activated>before.activated
+                    Check(WaitForActivation(Status,after,before.activated)
                         && MonitorFromWindow(child.Window(),MONITOR_DEFAULTTONEAREST)==monitors[1]
                         && state.paints>0 && state.paintedColor==static_cast<LONG>(RestoredColor),
                         "old callback did not cancel the replacement intent, which still moved and painted");
@@ -290,13 +298,14 @@ int wmain(int argc,wchar_t** argv) {
                     interruption==2?"cancel/rearm":"cancel");
                 continue;
             }
+            if (activation)
+                Check(WaitForActivation(Status,after,before.activated),"real cross-process visible activation hook exercised");
             printf("native paint trace activate=%d max=%d suppressions=%ld sizes=%ld paints=%ld client=%ldx%ld size=%ldx%ld painted=%ldx%ld color=%06lx flags=%lx restored=%llu->%llu activated=%llu->%llu\n",
                 activation?1:0,maximized?1:0,state.suppressions,state.sizes,state.paints,state.clientWidth,state.clientHeight,
                 state.sizeWidth,state.sizeHeight,state.paintWidth,state.paintHeight,state.paintedColor,state.finalFlags,
                 before.restored,after.restored,before.activated,after.activated);
             if (activation) {
                 Check(state.activeAfter!=0,"fixture became active through SetActiveWindow on the private desktop");
-                Check(after.activated>before.activated,"real cross-process visible activation hook exercised");
             } else Check(after.restored>before.restored,"real cross-process pre-restore placement hook exercised");
             Check(state.suppressions>0,"application supplied redraw-suppression flags");
             Check(!state.iconic && state.maximized==(maximized?1:0),"placed window state preserved");

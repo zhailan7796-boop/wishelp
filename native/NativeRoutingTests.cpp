@@ -128,6 +128,15 @@ int wmain(int argc,wchar_t** argv) {
         Wait([&] {return Messages.compat==beforeGroup+1;});
         Check(intent(Messages.serial,&snapshot,sizeof(snapshot)) && snapshot.entry.count==2,"selected group retains verified candidate identities");
         cancel(0);
+
+        entry.count=0; entry.flags=TF_COLD_START|TF_REQUIRE_APP_ID|TF_PACKAGED_FOLLOW;
+        wcscpy_s(entry.appId,L"TaskbarFollow.PackageFixture_0000000000000!App");
+        const unsigned beforePackage=Messages.compat;
+        Check(release(&entry,target,FALSE)!=FALSE,"packaged launch arms native and after-show routing");
+        Wait([&] {return Messages.compat==beforePackage+1;});
+        Check(intent(Messages.serial,&snapshot,sizeof(snapshot)) && snapshot.entry.flags==entry.flags && !snapshot.nativeClaimed,
+            "packaged launch exposes its exact flags and initially unclaimed state");
+        Check(cancelCompatibility(Messages.serial)!=FALSE,"a packaged follow can end its own intent after confirmation");
         entry.count=0; entry.flags=0;
         Check(!release(&entry,target,FALSE),"unverified no-window button remains unsupported");
         wcscpy_s(entry.path,L"C:\\not-the-test-executable.exe"); entry.flags=TF_COLD_START|TF_COMPATIBILITY;
