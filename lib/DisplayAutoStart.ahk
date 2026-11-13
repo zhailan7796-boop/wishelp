@@ -32,12 +32,13 @@ class DisplayStartPolicy {
 }
 
 class DisplayWatcher {
-    __New(root,startupPath := "") {
+    __New(root,startupPath := "", logonTask := false) {
         this.Root := RTrim(root,"\")
         this.MainScript := this.Root . "\TaskbarFollow.ahk"
         this.WatchScript := this.Root . "\DisplayWatch.ahk"
         this.Runtime := this.Root . "\runtime\AutoHotkey64.exe"
         this.StartupPath := startupPath != "" ? startupPath : A_Startup . "\TaskbarFollow.lnk"
+        this.LogonTask := logonTask, this.TaskCheckedAt := -10000, this.TaskEnabled := false
         this.Policy := DisplayStartPolicy()
         this.State := "waiting", this.LastReport := "", this.LastLaunchPid := 0
         this.Started := false, this.Stopped := false, this.Busy := false, this.DisconnectSeen := false
@@ -73,6 +74,16 @@ class DisplayWatcher {
     Count() => SysGet(80) ; SM_CMONITORS: displays participating in the desktop
     Now() => DllCall("kernel32\GetTickCount64","uint64")
     Installed() {
+        if this.LogonTask {
+            now := this.Now()
+            if now-this.TaskCheckedAt >= 10000 {
+                if !HasProp(this,"TaskRegistration")
+                    this.TaskRegistration := DisplayLogonTask(this.Root)
+                this.TaskEnabled := this.TaskRegistration.Status() = "screen"
+                this.TaskCheckedAt := now
+            }
+            return this.TaskEnabled
+        }
         if !FileExist(this.StartupPath)
             return false
         try {

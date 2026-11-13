@@ -156,7 +156,7 @@ class TaskbarFollow {
         if this.TrayBuilt && !this.TestMode {
             A_IconTip := "随屏 · 任务栏窗口跟随`n" . (!this.Enabled ? "已暂停" : (this.HelperReady && this.MappingsReady ? "运行中" : "正在连接任务栏识别器"))
             (this.Enabled ? A_TrayMenu.Check("启用任务栏跟随") : A_TrayMenu.Uncheck("启用任务栏跟随"))
-            (DisplayStartup.IsEnabled(A_ScriptDir,this.StartupPath()) ? A_TrayMenu.Check("连接第二块屏幕时自动启动") : A_TrayMenu.Uncheck("连接第二块屏幕时自动启动"))
+            (DisplayStartup.IsEnabled(A_ScriptDir) ? A_TrayMenu.Check("连接第二块屏幕时自动启动") : A_TrayMenu.Uncheck("连接第二块屏幕时自动启动"))
             if this.NativeMode
                 (this.FollowPeek ? A_TrayMenu.Check("悬停预览随屏") : A_TrayMenu.Uncheck("悬停预览随屏"))
         }
@@ -279,13 +279,16 @@ class TaskbarFollow {
         this.ReportActivity(this.FollowPeek?"悬停预览随屏已启用。":"悬停预览随屏已关闭，点击定位继续运行。")
         this.UpdateTray()
     }
-    StartupPath() => DisplayStartup.Path()
     ToggleStartup(*) {
         if this.TestOnly
             return
-        path := this.StartupPath()
-        enabled := !DisplayStartup.IsEnabled(A_ScriptDir,path)
-        DisplayStartup.Set(enabled,A_ScriptDir,path)
+        enabled := !DisplayStartup.IsEnabled(A_ScriptDir)
+        try DisplayStartup.Set(enabled,A_ScriptDir)
+        catch as failure {
+            this.Log("display startup setting failed: " . failure.Message)
+            MsgBox("无法更新双屏自动启动：`n" . failure.Message,"随屏 · 自动启动","Iconx")
+            return
+        }
         this.ReportActivity(enabled ? "屏幕连接检测已开启，连接第二块屏幕时自动启动。" : "屏幕连接检测已关闭。")
         this.UpdateTray()
     }

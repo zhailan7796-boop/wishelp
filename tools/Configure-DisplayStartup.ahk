@@ -8,11 +8,12 @@ try {
     command := A_Args.Length = 1 ? A_Args[1] : "status"
     if command != "enable" && command != "disable" && command != "status"
         throw Error("Use enable, disable, or status")
-    detectorPid := 0
+    instance := 0
     if command != "status"
-        detectorPid := DisplayStartup.Set(command = "enable",root)
-    FileAppend("display-startup=" . DisplayStartup.Shortcut(root) . "; watcher-pid=" . detectorPid
-        . "; shortcut=" . DisplayStartup.Path() . "`n","*","UTF-8")
+        instance := DisplayStartup.Set(command = "enable",root)
+    logon := DisplayLogonTask(root)
+    FileAppend("display-startup=" . (DisplayStartup.IsEnabled(root) ? "screen" : "off")
+        . "; logon-task=" . logon.Status() . "; instance=" . instance . "; legacy-shortcut=" . DisplayStartup.Shortcut(root) . "`n","*","UTF-8")
     ExitApp(0)
 } catch as e {
     FileAppend("FAIL display startup: " . e.Message . "`n","*","UTF-8")

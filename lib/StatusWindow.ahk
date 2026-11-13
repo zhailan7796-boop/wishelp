@@ -86,7 +86,7 @@ class FollowStatusWindow {
         this.SetText("ToggleButton",app.Enabled ? "暂停跟随" : "启用跟随")
         elapsed := Max(0, Floor((Desktop.Tick() - app.StartTick) / 1000))
         runtime := Format("{:02}:{:02}:{:02}", elapsed // 3600, Mod(elapsed // 60, 60), Mod(elapsed, 60))
-        this.SetText("Footer","已运行 " . runtime . "    ·    v0.3.4    ·    Ctrl+Alt+F12 暂停/启用")
+        this.SetText("Footer","已运行 " . runtime . "    ·    v0.3.5    ·    Ctrl+Alt+F12 暂停/启用")
         return true
     }
     static AppDirectory {
