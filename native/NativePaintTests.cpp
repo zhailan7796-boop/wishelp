@@ -12,7 +12,9 @@
 namespace {
 constexpr UINT PlacementMessage=WM_APP+41;
 constexpr UINT InterruptMessage=WM_APP+42;
+constexpr UINT ObservePlacementMessage=WM_APP+43;
 constexpr int ActivationCase=0, NormalRestoreCase=1, MaximizedRestoreCase=2;
+constexpr int ChromeActivationCase=5, ChromeMaximizedActivationCase=6;
 constexpr COLORREF InitialColor=RGB(28,73,132);
 constexpr COLORREF RestoredColor=RGB(31,137,91);
 struct FixtureState {
@@ -20,13 +22,15 @@ struct FixtureState {
     LONG initialPaints, initialColor, suppressions, sizes, paints;
     LONG sizeWidth, sizeHeight, paintWidth, paintHeight, paintedColor;
     LONG clientWidth, clientHeight, iconic, maximized, finalFlags, activeBefore, activeAfter;
-    LONG interruptMode, interruptions, interruptSucceeded;
+    LONG interruptMode, interruptions, interruptSucceeded, movedDuringActivation, minimizedAfterActivation;
     RECT before, after;
 };
 FixtureState* Fixture{};
 HANDLE Observed{};
 bool Checking{};
 bool VisibleActivation{};
+bool ChromeActivation{};
+bool Activating{};
 HWND Anchor{};
 using ArmFn=BOOL(*)(const wchar_t*,HWND,HMONITOR);
 using CancelFn=void(*)(unsigned);
@@ -73,9 +77,13 @@ LRESULT CALLBACK FixtureProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
         Checking=true;
         if (VisibleActivation) {
             if (GetActiveWindow()==hwnd) SetActiveWindow(Anchor);
+            Activating=true;
             SetActiveWindow(hwnd);
+            Activating=false;
             Fixture->activeAfter=GetActiveWindow()==hwnd?1:0;
         } else ShowWindow(hwnd,SW_RESTORE);
+    }
+    if (message==PlacementMessage || message==ObservePlacementMessage) {
         // PeekMessage generates pending WM_PAINT before reporting an empty
         // queue. This observes ordinary invalidation from the placement itself;
         // UpdateWindow/InvalidateRect here would conceal the regression.
@@ -87,7 +95,7 @@ LRESULT CALLBACK FixtureProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
     }
     if (message==WM_WINDOWPOSCHANGING) {
         const LRESULT result=DefWindowProcW(hwnd,message,wparam,lparam);
-        if (Checking) {
+        if (Checking && (!ChromeActivation || Activating)) {
             auto* position=reinterpret_cast<WINDOWPOS*>(lparam);
             position->flags|=SWP_NOMOVE|SWP_NOSIZE|SWP_NOREDRAW;
             ++Fixture->suppressions;
@@ -100,25 +108,38 @@ LRESULT CALLBACK FixtureProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam)
         }
         return result;
     }
-    if (message==WM_WINDOWPOSCHANGED && Checking)
+    if (message==WM_WINDOWPOSCHANGED && Checking) {
         Fixture->finalFlags=static_cast<LONG>(reinterpret_cast<WINDOWPOS*>(lparam)->flags);
+        if (Activating && !(Fixture->finalFlags&SWP_NOMOVE)) {
+            RECT current{};
+            if (GetWindowRect(hwnd,&current) && !EqualRect(&current,&Fixture->before))
+                Fixture->movedDuringActivation=1;
+        }
+    }
     if (message==WM_SIZE && wparam!=SIZE_MINIMIZED) {
         if (Checking) ++Fixture->sizes;
         Fixture->sizeWidth=LOWORD(lparam); Fixture->sizeHeight=HIWORD(lparam);
     }
+    if (message==WM_SIZE && wparam==SIZE_MINIMIZED && Checking && ChromeActivation && !Activating)
+        ++Fixture->minimizedAfterActivation;
     if (message==WM_PAINT) {
         PAINTSTRUCT paint{}; HDC dc=BeginPaint(hwnd,&paint);
         RECT client{}; GetClientRect(hwnd,&client);
         HBRUSH brush=CreateSolidBrush(Checking?RestoredColor:InitialColor);
         FillRect(dc,&client,brush); DeleteObject(brush);
         // Read the pixels painted into the real window DC, including on the
-        // owned inactive desktop. A counter alone would miss a blank paint.
-        const COLORREF color=GetPixel(dc,client.right/2,client.bottom/2);
+        // owned inactive desktop. A resize can invalidate only a clipped band.
+        const RECT& dirty=paint.rcPaint;
+        const COLORREF color=GetPixel(dc,dirty.left+(dirty.right-dirty.left)/2,
+            dirty.top+(dirty.bottom-dirty.top)/2);
         EndPaint(hwnd,&paint);
         if (Checking && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
-            ++Fixture->paints; Fixture->paintWidth=client.right; Fixture->paintHeight=client.bottom;
-            Fixture->paintedColor=static_cast<LONG>(color);
-            Fixture->paintMonitor=reinterpret_cast<UINT_PTR>(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST));
+            ++Fixture->paints;
+            if (color!=CLR_INVALID) {
+                Fixture->paintWidth=client.right; Fixture->paintHeight=client.bottom;
+                Fixture->paintedColor=static_cast<LONG>(color);
+                Fixture->paintMonitor=reinterpret_cast<UINT_PTR>(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST));
+            }
         } else if (!Checking && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
             ++Fixture->initialPaints; Fixture->initialColor=static_cast<LONG>(color);
         }
@@ -139,8 +160,11 @@ int RunFixture(int argc,wchar_t** argv) {
     HANDLE ready=OpenEventW(EVENT_MODIFY_STATE,FALSE,readyName.c_str());
     Observed=OpenEventW(EVENT_MODIFY_STATE,FALSE,observedName.c_str());
     if (!ready || !Observed) return 5;
+    const int scenario=_wtoi(argv[5]);
+    ChromeActivation=scenario>=ChromeActivationCase;
+    VisibleActivation=scenario==ActivationCase || ChromeActivation;
     WNDCLASSW cls{}; cls.hInstance=GetModuleHandleW(nullptr); cls.lpfnWndProc=FixtureProc;
-    cls.lpszClassName=L"TaskbarFollow.NativePaintFixture";
+    cls.lpszClassName=ChromeActivation?L"Chrome_WidgetWin_1":L"TaskbarFollow.NativePaintFixture";
     cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
     if (!RegisterClassW(&cls)) return 6;
     HWND hwnd=CreateWindowExW(0,cls.lpszClassName,L"TaskbarFollow owned repaint fixture",
@@ -148,9 +172,8 @@ int RunFixture(int argc,wchar_t** argv) {
         nullptr,nullptr,cls.hInstance,nullptr);
     if (!hwnd) return 7;
     Fixture->hwnd=reinterpret_cast<UINT_PTR>(hwnd);
-    const int scenario=_wtoi(argv[5]);
-    VisibleActivation=scenario==ActivationCase;
-    ShowWindow(hwnd,scenario==MaximizedRestoreCase?SW_SHOWMAXIMIZED:SW_SHOWNORMAL);
+    const bool maximized=scenario==MaximizedRestoreCase || scenario==ChromeMaximizedActivationCase;
+    ShowWindow(hwnd,maximized?SW_SHOWMAXIMIZED:SW_SHOWNORMAL);
     UpdateWindow(hwnd); DrainMessages();
     if (VisibleActivation) {
         // A second owned top-level window gives SetActiveWindow a genuine
@@ -216,7 +239,7 @@ struct Child {
         WaitForFixture(ready,process,"fixture initial paint/state handshake");
         printf("native paint initial paints=%ld color=%06lx\n",state->initialPaints,state->initialColor);
         Check(state->initialPaints>0 && state->initialColor==static_cast<LONG>(InitialColor),"fixture initially painted real colored content");
-        if (scenario==ActivationCase) {
+        if (scenario==ActivationCase || scenario>=ChromeActivationCase) {
             Check(IsWindowVisible(Window()) && !IsIconic(Window()),"activation fixture initially visible");
             Check(state->activeBefore!=0,"owned anchor became active on the private desktop");
         } else Check(IsIconic(Window())!=FALSE,"fixture initially minimized");
@@ -252,9 +275,10 @@ int wmain(int argc,wchar_t** argv) {
         auto Start=reinterpret_cast<StartFn>(GetProcAddress(dll,"TF_Start"));
         Stop=reinterpret_cast<StopFn>(GetProcAddress(dll,"TF_StopAndWait"));
         auto Arm=reinterpret_cast<ArmFn>(GetProcAddress(dll,"TF_TestArm"));
+        auto ReleaseEntry=reinterpret_cast<BOOL(*)(const NativeEntry*,HMONITOR,BOOL)>(GetProcAddress(dll,"TF_TestReleaseEntry"));
         ControllerCancel=reinterpret_cast<CancelFn>(GetProcAddress(dll,"TF_Cancel")); ControllerArm=Arm;
         auto Status=reinterpret_cast<StatusFn>(GetProcAddress(dll,"TF_Status"));
-        Check(Start && Stop && Arm && Status && ControllerCancel,"native paint ABI");
+        Check(Start && Stop && Arm && ReleaseEntry && Status && ControllerCancel,"native paint ABI");
         WNDCLASSW controllerClass{}; controllerClass.hInstance=GetModuleHandleW(nullptr);
         controllerClass.lpfnWndProc=ControllerProc; controllerClass.lpszClassName=L"TaskbarFollow.NativePaintController";
         Check(RegisterClassW(&controllerClass)!=0,"register owned paint controller");
@@ -265,16 +289,26 @@ int wmain(int argc,wchar_t** argv) {
         MONITORINFO source{sizeof(source)}; Check(GetMonitorInfoW(monitors[0],&source)!=FALSE,"source monitor info");
         ControllerTarget=monitors[1];
         Check(Start(nullptr,TF_TEST_MODE)!=FALSE,"native paint controller startup");
-        for (int scenario=ActivationCase;scenario<=4;++scenario) {
-            const int interruption=scenario>=3?scenario-2:0;
-            const bool activation=scenario==ActivationCase || interruption, maximized=scenario==MaximizedRestoreCase;
+        for (int scenario=ActivationCase;scenario<=ChromeMaximizedActivationCase;++scenario) {
+            const bool chrome=scenario>=ChromeActivationCase;
+            const int interruption=scenario>=3 && !chrome?scenario-2:0;
+            const bool activation=scenario==ActivationCase || interruption || chrome;
+            const bool maximized=scenario==MaximizedRestoreCase || scenario==ChromeMaximizedActivationCase;
             Child child;
             child.Spawn(L"Local\\TaskbarFollow.NativePaint."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(scenario),
                 desktopName,source,interruption?ActivationCase:scenario);
             ControllerFixture=child.state;
             child.state->controller=reinterpret_cast<UINT_PTR>(controller); child.state->interruptMode=interruption;
             NativeStatus before{}; Check(Status(&before,sizeof(before))!=FALSE,"pre-placement status");
-            Check(Arm(Executable().c_str(),child.Window(),monitors[1])!=FALSE,"native repaint placement arm");
+            if (chrome) {
+                NativeEntry entry{};
+                wcscpy_s(entry.path,Executable().c_str());
+                wcscpy_s(entry.appId,L"Chrome");
+                entry.count=1;
+                DWORD pid{}; GetWindowThreadProcessId(child.Window(),&pid);
+                entry.windows[0]={child.state->hwnd,pid,0};
+                Check(ReleaseEntry(&entry,monitors[1],FALSE)!=FALSE,"verified Chrome taskbar entry arm");
+            } else Check(Arm(Executable().c_str(),child.Window(),monitors[1])!=FALSE,"native repaint placement arm");
             Check(PostMessageW(child.Window(),PlacementMessage,0,0)!=FALSE,"fixture placement command");
             WaitForFixture(child.observed,child.process,"fixture placement observation handshake");
             NativeStatus after{}; Check(Status(&after,sizeof(after))!=FALSE,"post-placement status");
@@ -300,6 +334,11 @@ int wmain(int argc,wchar_t** argv) {
             }
             if (activation)
                 Check(WaitForActivation(Status,after,before.activated),"real cross-process visible activation hook exercised");
+            if (chrome) {
+                ResetEvent(child.observed);
+                Check(PostMessageW(child.Window(),ObservePlacementMessage,0,0)!=FALSE,"observe final Chrome placement");
+                WaitForFixture(child.observed,child.process,"Chrome final placement observation handshake");
+            }
             printf("native paint trace activate=%d max=%d suppressions=%ld sizes=%ld paints=%ld client=%ldx%ld size=%ldx%ld painted=%ldx%ld color=%06lx flags=%lx restored=%llu->%llu activated=%llu->%llu\n",
                 activation?1:0,maximized?1:0,state.suppressions,state.sizes,state.paints,state.clientWidth,state.clientHeight,
                 state.sizeWidth,state.sizeHeight,state.paintWidth,state.paintHeight,state.paintedColor,state.finalFlags,
@@ -307,19 +346,28 @@ int wmain(int argc,wchar_t** argv) {
             if (activation) {
                 Check(state.activeAfter!=0,"fixture became active through SetActiveWindow on the private desktop");
             } else Check(after.restored>before.restored,"real cross-process pre-restore placement hook exercised");
-            Check(state.suppressions>0,"application supplied redraw-suppression flags");
+            if (chrome) Check(!state.movedDuringActivation && state.minimizedAfterActivation==1,
+                "Chrome moved through one minimized restore after native activation");
+            else Check(state.suppressions>0,"application supplied redraw-suppression flags");
             Check(!state.iconic && state.maximized==(maximized?1:0),"placed window state preserved");
             Check(MonitorFromWindow(child.Window(),MONITOR_DEFAULTTONEAREST)==monitors[1],"placed window reached target monitor");
             Check(!EqualRect(&state.before,&state.after),"placement changed actual window geometry");
             Check((activation || state.sizes>0) && state.sizeWidth==state.clientWidth && state.sizeHeight==state.clientHeight,
                 "application received coherent final client-size notification");
+            if (scenario==ChromeMaximizedActivationCase) {
+                // A moved maximized window can have an empty paint DC on an
+                // inactive desktop. Verify its sizing and activation order here.
+                Check(state.sizes>0,"maximized Chrome fixture observed its new size");
+                printf("PASS native placement: maximized Chrome activation used target geometry after activation\n");
+                continue;
+            }
             Check(state.paints>0,"cross-monitor placement changed geometry without a client repaint");
             Check(state.paintWidth==state.clientWidth && state.paintHeight==state.clientHeight
                 && state.paintedColor==static_cast<LONG>(RestoredColor)
                 && state.paintMonitor==reinterpret_cast<UINT_PTR>(monitors[1]),
                 "placed client repainted colored content at its final size on the target monitor");
             printf("PASS native repaint: %s moved to target with coherent client size and fresh colored content\n",
-                activation?"visible activation":(maximized?"maximized restore":"normal restore"));
+                chrome?"normal Chrome activation":(activation?"visible activation":(maximized?"maximized restore":"normal restore")));
         }
         Check(Stop(3000)!=FALSE,"native paint controller stop");
         FreeLibrary(dll); dll=nullptr; exitCode=0;

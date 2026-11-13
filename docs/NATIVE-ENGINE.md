@@ -17,6 +17,14 @@
 
 修正 `WM_WINDOWPOSCHANGING` 的几何后，若应用原先禁止移动/缩放或采用不同几何，同时清除 `SWP_NOREDRAW`、设置 `SWP_NOCOPYBITS`，让窗口按新几何绘制。可见激活也使用短期子类；成功依据实际目标屏幕确认，不能只依据 `SetWindowPos` 返回值。
 
+已打开的 Chrome 在目标屏任务栏触发激活时，激活结束后由窗口线程短暂最小化窗口，更新最小化窗口的恢复位置，再在目标屏恢复原来的普通或最大化状态。普通窗口和最大化窗口都用独立 Chrome 实例在实际任务栏双向测试，并取样屏幕上的彩色测试页。
+
+运行中的随屏可用以下命令验证。测试会短暂使用鼠标，并打开独立的 Chrome 窗口。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Invoke-InputDesktop.ps1 -Script 'tests\LiveChrome.ahk' -OutputName 'live-chrome'
+```
+
 ## 分组与取消
 
 多窗口应用的分组按钮只准备上下文，不随便挑一个窗口定位。用户实际点击原生缩略图后，用之前核验的候选 HWND/PID，匹配 Windows 同步发出的恢复/激活事件。支持从按钮悬停进入预览；上下文有短期时限。

@@ -208,6 +208,7 @@ struct Placement {
     bool activationOnly{};
     std::uint64_t verifyAt{};
     bool retried{};
+    UINT visibleMoveMessage{};
 };
 bool ExactWindowIdentity(HWND hwnd,const wchar_t* expected) {
     static const PROPERTYKEY key={{0x9f4c2855,0x9f79,0x4b39,{0xa8,0xd0,0xe1,0xd4,0x2d,0xe1,0xd5,0xf3}},5};
@@ -241,6 +242,8 @@ bool StillCurrent(Shared* shared,const Transaction& tx) {
     return Snapshot(shared,current) && current.serial==tx.serial;
 }
 void RemovePlacement(HWND hwnd,Placement* placement);
+RECT NormalOnTarget(HWND hwnd,const Transaction& tx,const WINDOWPLACEMENT& wp);
+BOOL PlaceMinimized(HWND hwnd,const Transaction& tx,WINDOWPLACEMENT wp,const RECT& normal);
 bool VisibleRectOnTarget(HWND hwnd,const Transaction& tx,RECT& rect) {
     if (IsZoomed(hwnd)) { rect=MaxRect(hwnd,tx); return true; }
     MONITORINFO source{sizeof(source)};
@@ -260,6 +263,28 @@ bool PositionLeavesTarget(HWND hwnd,const WINDOWPOS& position,HMONITOR target) {
     const RECT proposed{position.x,position.y,position.x+width,position.y+height};
     return MonitorFromRect(&proposed,MONITOR_DEFAULTTONEAREST)!=target;
 }
+BOOL ApplyVisibleRect(HWND hwnd,const RECT& rect) {
+    Reentry=true;
+    const BOOL moved=SetWindowPos(hwnd,nullptr,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+        SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
+    Reentry=false;
+    return moved;
+}
+void MoveActivatedChrome(Shared* shared,HWND hwnd,Placement* placement) {
+    const Transaction& tx=placement->tx;
+    WINDOWPLACEMENT before{sizeof(before)};
+    if (!GetWindowPlacement(hwnd,&before)) return;
+    const RECT normal=NormalOnTarget(hwnd,tx,before);
+    // Chromium can leave the compositor blank after a visible cross-monitor
+    // move. Restoring from minimized restarts rendering at the new bounds.
+    Reentry=true;
+    ShowWindow(hwnd,SW_SHOWMINNOACTIVE);
+    WINDOWPLACEMENT minimized{sizeof(minimized)};
+    if (IsIconic(hwnd) && !placement->removed && StillCurrent(shared,tx) && GetWindowPlacement(hwnd,&minimized))
+        PlaceMinimized(hwnd,tx,minimized,normal);
+    if (IsIconic(hwnd)) ShowWindow(hwnd,before.showCmd==SW_SHOWMAXIMIZED?SW_SHOWMAXIMIZED:SW_RESTORE);
+    Reentry=false;
+}
 void VerifyPlacement(Shared* shared,HWND hwnd,Placement* placement) {
     const std::uint64_t now=Now();
     if (!placement->verifyAt || now<placement->verifyAt) return;
@@ -273,15 +298,12 @@ void VerifyPlacement(Shared* shared,HWND hwnd,Placement* placement) {
     RECT rect{};
     // Some moves bypass WM_WINDOWPOSCHANGING. Retry at most once, for the
     // same visible foreground window and only while the click is still fresh.
-    if (!onTarget && !placement->retried && now-placement->verifyAt<=PlacementSettleMs
+    if (!onTarget && !placement->visibleMoveMessage && !placement->retried && now-placement->verifyAt<=PlacementSettleMs
         && GetForegroundWindow()==hwnd && VisibleRectOnTarget(hwnd,tx,rect) && StillCurrent(shared,tx)) {
         placement->normal=rect;
         placement->retried=true;
         placement->verifyAt=now+PlacementSettleMs;
-        Reentry=true;
-        SetWindowPos(hwnd,nullptr,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
-            SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
-        Reentry=false;
+        ApplyVisibleRect(hwnd,rect);
         return;
     }
     if (CancelTransaction(shared,tx)) {
@@ -310,13 +332,27 @@ LRESULT CALLBACK PlacementProc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lpara
         if (placement->calls==1 && !Reentry) VerifyPlacement(shared,hwnd,placement);
         return 0;
     }
+    if (placement->visibleMoveMessage && message==placement->visibleMoveMessage) {
+        if (wparam!=placement->tx.serial || lparam!=static_cast<LPARAM>(placement->tx.epoch)) return 0;
+        if (!placement->verifyAt && placement->calls==1 && !Reentry && GetActiveWindow()==hwnd
+            && IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+            placement->verifyAt=Now()+PlacementSettleMs;
+            if (MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)!=Monitor(placement->tx.monitor))
+                MoveActivatedChrome(shared,hwnd,placement);
+        }
+        return 0;
+    }
     const LRESULT result=DefSubclassProc(hwnd,message,wparam,lparam);
-    if (placement->removed) return result;
     // Application handlers can pump messages or synchronously ask the
     // controller to cancel/rearm. Never apply old geometry, claim identity,
     // or cancel a newer input epoch after returning from that application.
-    if (!StillCurrent(shared,placement->tx)) {
+    if (placement->removed || !StillCurrent(shared,placement->tx)) {
         RemovePlacement(hwnd,placement); return result;
+    }
+    if (placement->visibleMoveMessage) {
+        if (message==WM_ACTIVATE && LOWORD(wparam)!=WA_INACTIVE && !placement->verifyAt)
+            PostMessageW(hwnd,placement->visibleMoveMessage,placement->tx.serial,placement->tx.epoch);
+        return result;
     }
     if (placement->pendingIdentity) {
         // Do not claim on hidden setup geometry: applications may assign a
@@ -379,7 +415,8 @@ void RemovePlacement(HWND hwnd,Placement* placement) {
         RemoveWindowSubclass(hwnd,PlacementProc,SubclassId); KillTimer(hwnd,SubclassId);
     }
 }
-bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendingIdentity=false,bool activationOnly=false) {
+bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendingIdentity=false,
+    bool activationOnly=false,UINT visibleMoveMessage=0) {
     DWORD_PTR previous{};
     if (GetWindowSubclass(hwnd,PlacementProc,SubclassId,&previous)) {
         auto* old=reinterpret_cast<Placement*>(previous);
@@ -390,6 +427,7 @@ bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendi
     if (!placement) return false;
     placement->pendingIdentity=pendingIdentity;
     placement->activationOnly=activationOnly;
+    placement->visibleMoveMessage=visibleMoveMessage;
     // A window procedure must remain executable after the controller unhooks.
     // Pin only a process which actually receives a temporary placement subclass.
     // Content-addressed DLL filenames allow subsequent builds while that process runs.
@@ -403,12 +441,18 @@ bool Attach(HWND hwnd,const Transaction& tx,RECT normal,bool wantsMax,bool pendi
     PlacementCall call(placement); RemovePlacement(hwnd,placement);
     return false;
 }
-RECT NormalOnTarget(HWND hwnd,const Transaction& tx,WINDOWPLACEMENT& wp) {
+RECT NormalOnTarget(HWND hwnd,const Transaction& tx,const WINDOWPLACEMENT& wp) {
     MONITORINFO source{sizeof(source)};
     GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&source);
     RECT normal=wp.rcNormalPosition;
     OffsetRect(&normal,source.rcWork.left-source.rcMonitor.left,source.rcWork.top-source.rcMonitor.top);
     return MapRect(normal,source.rcWork,tx.target.rcWork);
+}
+BOOL PlaceMinimized(HWND hwnd,const Transaction& tx,WINDOWPLACEMENT wp,const RECT& normal) {
+    wp.rcNormalPosition=normal;
+    OffsetRect(&wp.rcNormalPosition,tx.target.rcMonitor.left-tx.target.rcWork.left,tx.target.rcMonitor.top-tx.target.rcWork.top);
+    wp.ptMaxPosition={-1,-1};
+    return SetWindowPlacement(hwnd,&wp);
 }
 bool PrepareRestore(Shared* shared, HWND hwnd,const Transaction& tx) {
     WINDOWPLACEMENT wp{sizeof(wp)};
@@ -416,11 +460,8 @@ bool PrepareRestore(Shared* shared, HWND hwnd,const Transaction& tx) {
     const bool maximized=(wp.flags&WPF_RESTORETOMAXIMIZED)!=0 || wp.showCmd==SW_SHOWMAXIMIZED;
     RECT normal=NormalOnTarget(hwnd,tx,wp);
     if (!Attach(hwnd,tx,normal,maximized)) return false;
-    wp.rcNormalPosition=normal;
-    OffsetRect(&wp.rcNormalPosition,tx.target.rcMonitor.left-tx.target.rcWork.left,tx.target.rcMonitor.top-tx.target.rcWork.top);
-    wp.ptMaxPosition={-1,-1};
     Reentry=true;
-    const BOOL changed=SetWindowPlacement(hwnd,&wp); // remains minimized; no restore/maximize round trip
+    const BOOL changed=PlaceMinimized(hwnd,tx,wp,normal); // remains minimized
     Reentry=false;
     if (changed && StillCurrent(shared,tx)) { InterlockedIncrement64(&shared->restored); Event(shared,TF_RESTORE,hwnd,&tx); }
     return changed!=FALSE;
@@ -431,10 +472,16 @@ bool PositionVisible(Shared* shared,HWND hwnd,const Transaction& tx) {
         return false;
     }
     RECT r{};
-    if (!VisibleRectOnTarget(hwnd,tx,r) || !Attach(hwnd,tx,r,IsZoomed(hwnd)!=FALSE,false,true)) return false;
-    Reentry=true;
-    const BOOL moved=SetWindowPos(hwnd,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
-    Reentry=false;
+    if (!VisibleRectOnTarget(hwnd,tx,r)) return false;
+    UINT visibleMoveMessage=0;
+    if (IsWindowVisible(hwnd) && (_wcsicmp(tx.entry.appId,L"Chrome")==0 || _wcsnicmp(tx.entry.appId,L"Chrome.",7)==0)
+        && ClassIs(hwnd,L"Chrome_WidgetWin_1")) {
+        static const UINT message=RegisterWindowMessageW(L"TaskbarFollow.Native.MoveActivatedChrome");
+        visibleMoveMessage=message;
+    }
+    if (!Attach(hwnd,tx,r,IsZoomed(hwnd)!=FALSE,false,true,visibleMoveMessage)) return false;
+    if (visibleMoveMessage && PostMessageW(hwnd,visibleMoveMessage,tx.serial,tx.epoch)) return true;
+    const BOOL moved=!visibleMoveMessage && ApplyVisibleRect(hwnd,r);
     const bool onTarget=moved && MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST)==Monitor(tx.monitor);
     if (!onTarget) {
         DWORD_PTR current{};
